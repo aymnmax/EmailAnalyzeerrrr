@@ -1,12 +1,97 @@
 /* ================================================================
-   MailTrace — EML Header Analyser
-   analyser.js — All parsing and rendering logic
+   Cybthreat — Email Header Analyser
+   analyser.js — All parsing, upload, and rendering logic
    ================================================================ */
+
+/* ─── File Upload & Drag-Drop ─────────────────────────────────────── */
+function handleFileUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  readEMLFile(file);
+  event.target.value = ''; // reset so same file can be re-selected
+}
+
+function readEMLFile(file) {
+  const validTypes = ['.eml', '.txt', '.msg'];
+  const isValid = validTypes.some(ext => file.name.toLowerCase().endsWith(ext));
+  if (!isValid) {
+    alert('Please select a .eml, .txt, or .msg file.');
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    document.getElementById('emlInput').value = e.target.result;
+    showFileLoadedBadge(file.name);
+    analyseEML();
+  };
+  reader.onerror = function() {
+    alert('Failed to read the file. Please try again.');
+  };
+  reader.readAsText(file, 'UTF-8');
+}
+
+function showFileLoadedBadge(filename) {
+  const hint = document.getElementById('inputHint');
+  if (hint) {
+    hint.innerHTML = `<span class="file-loaded-badge">
+      <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+        <path d="M3 8l4 4 6-6" stroke="currentColor" stroke-width="1.8"
+          stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      ${escapeHtml(filename)}
+    </span>`;
+  }
+}
+
+function resetInputHint() {
+  const hint = document.getElementById('inputHint');
+  if (hint) {
+    hint.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <rect x="2" y="4" width="12" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+      <path d="M5 4V3a3 3 0 016 0v1" stroke="currentColor" stroke-width="1.2"/>
+    </svg>
+    All analysis is done client-side — no data is sent anywhere`;
+  }
+}
+
+/* ─── DOMContentLoaded: drag-drop init ───────────────────────────── */
+document.addEventListener('DOMContentLoaded', function () {
+  const dropZone = document.getElementById('dropZone');
+
+  /* Drag over entire window → highlight drop zone */
+  ['dragenter', 'dragover'].forEach(evt => {
+    document.addEventListener(evt, e => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+  });
+
+  ['dragleave', 'drop'].forEach(evt => {
+    document.addEventListener(evt, e => {
+      dropZone.classList.remove('drag-over');
+    });
+  });
+
+  document.addEventListener('drop', function (e) {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    readEMLFile(file);
+  });
+
+  /* Click on drop zone → open file picker */
+  dropZone.addEventListener('click', function () {
+    document.getElementById('emlFileInput').click();
+  });
+});
 
 /* ─── Header Parser ──────────────────────────────────────────────── */
 function parseHeaders(raw) {
   const headers = {};
-  const unfolded = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const unfolded = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
     .replace(/\n[ \t]+/g, ' ');
 
   for (const line of unfolded.split('\n')) {
@@ -41,12 +126,10 @@ function extractIP(str) {
 function isPrivateIP(ip) {
   if (!ip) return false;
   const p = ip.split('.').map(Number);
-  return p[0] === 10 || (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
-    (p[0] === 192 && p[1] === 168) || p[0] === 127;
-}
-
-function isLoopback(ip) {
-  return ip === '127.0.0.1' || ip === '::1';
+  return p[0] === 10 ||
+    (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
+    (p[0] === 192 && p[1] === 168) ||
+    p[0] === 127;
 }
 
 /* ─── Auth Parser ────────────────────────────────────────────────── */
@@ -88,44 +171,40 @@ function badge(val) {
     return `<span class="badge badge-fail">✕ ${v}</span>`;
   if (['softfail', 'neutral', 'temperror', 'permerror', 'bestguesspass'].includes(v))
     return `<span class="badge badge-warn">⚠ ${v}</span>`;
-  if (['none', 'unknown', ''].includes(v))
-    return `<span class="badge badge-none">— none</span>`;
-  return `<span class="badge badge-none">${v}</span>`;
+  return `<span class="badge badge-none">— ${v}</span>`;
 }
 
 function escapeHtml(s) {
-  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /* ─── Main Analyser ──────────────────────────────────────────────── */
 function analyseEML() {
   const raw = document.getElementById('emlInput').value.trim();
-  if (!raw) { alert('Please paste email headers first.'); return; }
+  if (!raw) { alert('Please paste email headers or upload a .eml file first.'); return; }
 
   const h        = parseHeaders(raw);
   const findings = [];
 
-  /* — Basic envelope — */
-  const from      = get(h, 'from');
-  const to        = get(h, 'to');
-  const subject   = get(h, 'subject');
-  const date      = get(h, 'date');
-  const msgId     = get(h, 'message-id');
-  const replyTo   = get(h, 'reply-to');
-  const returnPath= get(h, 'return-path');
-  const xMailer   = get(h, 'x-mailer');
-  const xOrigIP   = get(h, 'x-originating-ip') || get(h, 'x-sender-ip');
-  const spamStatus= get(h, 'x-spam-status');
-  const spamScore = get(h, 'x-spam-score');
-  const priority  = get(h, 'x-priority') || get(h, 'importance');
-  const listUnsub = get(h, 'list-unsubscribe');
-  const authWarn  = get(h, 'x-authentication-warning');
+  /* Envelope */
+  const from       = get(h, 'from');
+  const to         = get(h, 'to');
+  const subject    = get(h, 'subject');
+  const date       = get(h, 'date');
+  const msgId      = get(h, 'message-id');
+  const replyTo    = get(h, 'reply-to');
+  const returnPath = get(h, 'return-path');
+  const xMailer    = get(h, 'x-mailer');
+  const xOrigIP    = get(h, 'x-originating-ip') || get(h, 'x-sender-ip');
+  const spamStatus = get(h, 'x-spam-status');
+  const spamScore  = get(h, 'x-spam-score');
+  const priority   = get(h, 'x-priority') || get(h, 'importance');
+  const authWarn   = get(h, 'x-authentication-warning');
 
-  /* — Auth — */
+  /* Auth */
   const authResultsRaw = get(h, 'authentication-results');
   const auth = parseAuthResults(authResultsRaw);
 
-  /* fallback: parse Received-SPF */
   if (auth.spf === 'none') {
     const spfH = get(h, 'received-spf');
     if (spfH) {
@@ -134,15 +213,14 @@ function analyseEML() {
     }
   }
 
-  /* fallback: parse DKIM-Signature presence */
   const dkimSig = get(h, 'dkim-signature');
   if (auth.dkim === 'none' && dkimSig) auth.dkim = 'present';
 
-  /* — Routing — */
+  /* Routing */
   const receivedAll = getAll(h, 'received');
-  const hops = receivedAll.map(parseReceived).reverse(); // oldest first
+  const hops = receivedAll.map(parseReceived).reverse();
 
-  /* — Domain extraction — */
+  /* Domain extraction */
   const fromAddr    = (from.match(/<([^>]+)>/) || from.match(/[\w.+%-]+@[\w.-]+/))?.[1] || from;
   const fromDomain  = fromAddr.includes('@') ? fromAddr.split('@')[1].toLowerCase() : '';
   const replyAddr   = (replyTo.match(/<([^>]+)>/) || [null, replyTo])[1] || replyTo;
@@ -151,29 +229,29 @@ function analyseEML() {
   const retDomain   = retAddr.includes('@') ? retAddr.split('@')[1].toLowerCase() : '';
   const dkimDomain  = dkimSig ? (dkimSig.match(/d=([^;\s]+)/i) || [])[1] || '' : '';
 
-  /* ─── FINDINGS & RISK ─────────────────────────────────────────── */
+  /* ─── FINDINGS ─────────────────────────────────────────────────── */
   let riskScore = 0;
   const riskBreakdown = [];
 
   /* SPF */
   if (auth.spf === 'pass') {
     findings.push({ t: 'SPF check passed', d: 'Sender IP is authorised by the domain\'s SPF record.', l: 'green', i: '✓' });
-  } else if (['fail','hardfail'].includes(auth.spf)) {
+  } else if (['fail', 'hardfail'].includes(auth.spf)) {
     findings.push({ t: 'SPF FAIL — sender IP not authorised', d: `The sending IP is not listed as authorised in the SPF record for ${fromDomain || 'this domain'}.`, l: 'red', i: '✕' });
     riskScore += 30; riskBreakdown.push({ label: 'SPF Fail', score: 30 });
   } else if (auth.spf === 'softfail') {
-    findings.push({ t: 'SPF SoftFail — sender may not be authorised', d: 'The ~all mechanism was matched, indicating the sender may not be authorised.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'SPF SoftFail — sender may not be authorised', d: 'The ~all mechanism was matched. Sender may not be authorised.', l: 'amber', i: '⚠' });
     riskScore += 15; riskBreakdown.push({ label: 'SPF SoftFail', score: 15 });
   } else {
-    findings.push({ t: 'SPF result missing or none', d: 'No SPF check was performed or no SPF record found. Cannot verify sending server legitimacy.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'SPF result missing or none', d: 'No SPF check performed or no SPF record found.', l: 'amber', i: '⚠' });
     riskScore += 10; riskBreakdown.push({ label: 'SPF Missing', score: 10 });
   }
 
   /* DKIM */
   if (auth.dkim === 'pass') {
-    findings.push({ t: 'DKIM signature verified', d: 'The email body and headers were cryptographically verified — no tampering detected.', l: 'green', i: '✓' });
+    findings.push({ t: 'DKIM signature verified', d: 'Email cryptographically verified — no tampering detected.', l: 'green', i: '✓' });
   } else if (auth.dkim === 'fail') {
-    findings.push({ t: 'DKIM FAIL — signature invalid or tampered', d: 'The DKIM signature did not verify. Message may have been modified in transit.', l: 'red', i: '✕' });
+    findings.push({ t: 'DKIM FAIL — signature invalid or tampered', d: 'DKIM signature did not verify. Message may have been modified in transit.', l: 'red', i: '✕' });
     riskScore += 35; riskBreakdown.push({ label: 'DKIM Fail', score: 35 });
   } else if (auth.dkim === 'present') {
     findings.push({ t: 'DKIM signature present but result not confirmed', d: 'A DKIM-Signature header exists but authentication-results do not confirm pass/fail.', l: 'amber', i: '⚠' });
@@ -190,44 +268,44 @@ function analyseEML() {
     findings.push({ t: 'DMARC FAIL — alignment failure, possible spoofing', d: `The From header domain (${fromDomain}) did not align with SPF or DKIM authenticated domains.`, l: 'red', i: '✕' });
     riskScore += 35; riskBreakdown.push({ label: 'DMARC Fail', score: 35 });
   } else {
-    findings.push({ t: 'DMARC result not found', d: 'DMARC was not evaluated or the domain lacks a DMARC policy. Spoofing risk elevated.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'DMARC result not found', d: 'DMARC was not evaluated or the domain lacks a DMARC policy.', l: 'amber', i: '⚠' });
     riskScore += 10; riskBreakdown.push({ label: 'DMARC Missing', score: 10 });
   }
 
   /* Reply-To mismatch */
   if (replyTo && replyDomain && fromDomain && replyDomain !== fromDomain) {
-    findings.push({ t: `Reply-To domain mismatch`, d: `From: ${fromDomain} → Reply-To: ${replyDomain}. Replies would go to a different domain — a classic phishing technique to harvest credentials.`, l: 'red', i: '✕' });
+    findings.push({ t: 'Reply-To domain mismatch — phishing indicator', d: `From: ${fromDomain} → Reply-To: ${replyDomain}. Replies go to a different domain — classic phishing technique.`, l: 'red', i: '✕' });
     riskScore += 40; riskBreakdown.push({ label: 'Reply-To Mismatch', score: 40 });
   }
 
   /* Return-Path mismatch */
   if (returnPath && retDomain && fromDomain && retDomain !== fromDomain) {
-    findings.push({ t: `Return-Path domain differs from From`, d: `From: ${fromDomain} → Return-Path: ${retDomain}. May indicate email spoofing or forwarding.`, l: 'amber', i: '⚠' });
+    findings.push({ t: 'Return-Path domain differs from From', d: `From: ${fromDomain} → Return-Path: ${retDomain}. May indicate spoofing or third-party sending.`, l: 'amber', i: '⚠' });
     riskScore += 20; riskBreakdown.push({ label: 'Return-Path Mismatch', score: 20 });
   }
 
   /* DKIM domain alignment */
   if (dkimDomain && fromDomain && dkimDomain !== fromDomain) {
-    findings.push({ t: `DKIM domain (${dkimDomain}) differs from From domain`, d: 'The domain that signed the email is not the same as the From address domain. Could indicate forwarding or third-party sending.', l: 'amber', i: '⚠' });
+    findings.push({ t: `DKIM domain (${dkimDomain}) differs from From domain`, d: 'The signing domain is not the same as the From address domain.', l: 'amber', i: '⚠' });
     riskScore += 10;
   }
 
   /* Message-ID */
   if (!msgId) {
-    findings.push({ t: 'Missing Message-ID header', d: 'Legitimate mail servers always add a Message-ID. Its absence often indicates spoofed or programmatically generated mail.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'Missing Message-ID header', d: 'Legitimate mail servers always add a Message-ID. Absence may indicate spoofed mail.', l: 'amber', i: '⚠' });
     riskScore += 10;
   }
 
-  /* Date */
+  /* Date checks */
   if (!date) {
-    findings.push({ t: 'Missing Date header', d: 'No Date header found. Required by RFC 5322; absence may indicate malformed or spoofed email.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'Missing Date header', d: 'No Date header found. Required by RFC 5322.', l: 'amber', i: '⚠' });
     riskScore += 5;
   } else {
     const d = new Date(date);
     if (!isNaN(d)) {
       const diffDays = (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24);
       if (diffDays < 0) {
-        findings.push({ t: 'Date header is in the future', d: `The email claims to have been sent ${Math.abs(Math.round(diffDays))} day(s) in the future. Possible timestamp manipulation.`, l: 'red', i: '✕' });
+        findings.push({ t: 'Date header is in the future', d: `Email claims to be sent ${Math.abs(Math.round(diffDays))} day(s) in the future. Possible timestamp manipulation.`, l: 'red', i: '✕' });
         riskScore += 15;
       }
     }
@@ -235,16 +313,15 @@ function analyseEML() {
 
   /* Hop analysis */
   if (hops.length === 0) {
-    findings.push({ t: 'No Received headers found', d: 'Cannot trace the mail routing path. Headers may have been stripped — suspicious in non-internal mail.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'No Received headers found', d: 'Cannot trace routing. Headers may have been stripped — suspicious for external mail.', l: 'amber', i: '⚠' });
   } else {
     if (hops.length > 6) {
-      findings.push({ t: `High hop count (${hops.length} hops)`, d: `Email passed through ${hops.length} servers. Unusually high hop counts may indicate relaying through compromised or anonymous infrastructure.`, l: 'amber', i: '⚠' });
+      findings.push({ t: `High hop count (${hops.length} hops)`, d: `Email passed through ${hops.length} servers. High counts may indicate anonymous relay infrastructure.`, l: 'amber', i: '⚠' });
       riskScore += 10;
     }
-    const extHops = hops.filter(hop => hop.ip && !isPrivateIP(hop.ip));
-    extHops.forEach(hop => {
-      if (hop.from.toLowerCase().includes('unknown')) {
-        findings.push({ t: `Unknown relay: ${hop.ip}`, d: `A hop from an UNKNOWN hostname (${hop.ip}) was detected in the routing chain.`, l: 'amber', i: '⚠' });
+    hops.forEach(hop => {
+      if (hop.from.toLowerCase().includes('unknown') && hop.ip && !isPrivateIP(hop.ip)) {
+        findings.push({ t: `Unknown relay hostname: ${hop.ip}`, d: `A hop from an UNKNOWN hostname was detected in the routing chain.`, l: 'amber', i: '⚠' });
         riskScore += 8;
       }
     });
@@ -252,43 +329,43 @@ function analyseEML() {
 
   /* Spam headers */
   if (spamStatus && /\byes\b/i.test(spamStatus)) {
-    findings.push({ t: `Spam filter flagged this message`, d: `X-Spam-Status: ${spamStatus}${spamScore ? ` (score: ${spamScore})` : ''}`, l: 'red', i: '✕' });
+    findings.push({ t: 'Spam filter flagged this message', d: `X-Spam-Status: ${spamStatus}${spamScore ? ` (score: ${spamScore})` : ''}`, l: 'red', i: '✕' });
     riskScore += 20;
   }
 
   /* X-Mailer */
   if (xMailer) {
-    const suspiciousMailers = ['phpmailer', 'python', 'curl', 'smtp2go', 'sendblaster'];
+    const suspiciousMailers = ['phpmailer', 'python', 'curl', 'smtp2go', 'sendblaster', 'massmailer'];
     const isSusp = suspiciousMailers.some(s => xMailer.toLowerCase().includes(s));
-    findings.push({ t: `X-Mailer: ${xMailer}`, d: isSusp ? 'This mailer is commonly used in bulk/phishing campaigns.' : 'Mailer client identifier found.', l: isSusp ? 'amber' : 'blue', i: isSusp ? '⚠' : 'i' });
+    findings.push({ t: `X-Mailer: ${xMailer}`, d: isSusp ? 'This mailer is commonly used in bulk/phishing campaigns.' : 'Mail client identifier found.', l: isSusp ? 'amber' : 'blue', i: isSusp ? '⚠' : 'i' });
     if (isSusp) riskScore += 8;
   }
 
-  /* X-Priority */
+  /* Priority */
   if (priority && (priority === '1' || priority.toLowerCase() === 'high')) {
-    findings.push({ t: 'High-priority flag set', d: 'Email marked as high priority. Phishing emails often use this to create urgency.', l: 'amber', i: '⚠' });
+    findings.push({ t: 'High-priority flag set', d: 'Email marked as urgent/high priority. Phishing emails often use this to create urgency.', l: 'amber', i: '⚠' });
     riskScore += 5;
   }
 
   /* Originating IP */
   if (xOrigIP) {
-    findings.push({ t: `Originating IP: ${xOrigIP}`, d: `X-Originating-IP or X-Sender-IP found. ${isPrivateIP(xOrigIP) ? 'This is a private/internal IP.' : 'Consider checking this IP against threat intelligence feeds.'}`, l: 'blue', i: 'i' });
+    findings.push({ t: `Originating IP: ${xOrigIP}`, d: `${isPrivateIP(xOrigIP) ? 'Private/internal IP — normal for internal mail.' : 'Public IP found. Consider checking against threat intel feeds.'}`, l: 'blue', i: 'i' });
   }
 
   /* Auth warning */
   if (authWarn) {
-    findings.push({ t: `Authentication warning present`, d: `X-Authentication-Warning: ${authWarn}`, l: 'amber', i: '⚠' });
+    findings.push({ t: 'Authentication warning present', d: `X-Authentication-Warning: ${authWarn}`, l: 'amber', i: '⚠' });
     riskScore += 10;
   }
 
-  /* All-clear */
+  /* All clear */
   if (findings.filter(f => f.l === 'red').length === 0 && riskScore === 0) {
-    findings.push({ t: 'No critical issues detected', d: 'Authentication checks passed and no major anomalies found. Always use human judgement for final assessment.', l: 'green', i: '✓' });
+    findings.push({ t: 'No critical issues detected', d: 'Authentication checks passed and no major anomalies found. Always apply human judgement.', l: 'green', i: '✓' });
   }
 
   riskScore = Math.min(100, riskScore);
 
-  /* ─── RENDER ─────────────────────────────────────────────────── */
+  /* ─── RENDER ALL ─────────────────────────────────────────────── */
   renderSummary(riskScore, hops.length, findings, auth);
   renderOverview(h, from, to, subject, date, msgId, replyTo, returnPath, riskScore, riskBreakdown, auth);
   renderAuth(auth, authResultsRaw, fromDomain, replyDomain, retDomain, dkimDomain);
@@ -303,7 +380,7 @@ function analyseEML() {
 
 /* ─── Render: Summary ────────────────────────────────────────────── */
 function renderSummary(riskScore, hopCount, findings, auth) {
-  const authScore = ['spf','dkim','dmarc'].filter(k => auth[k] === 'pass').length;
+  const authScore = ['spf', 'dkim', 'dmarc'].filter(k => auth[k] === 'pass').length;
   const riskLabel = riskScore >= 60 ? 'HIGH' : riskScore >= 30 ? 'MEDIUM' : 'LOW';
   const riskClass = riskScore >= 60 ? 'risk-high' : riskScore >= 30 ? 'risk-med' : 'risk-low';
   const barClass  = riskScore >= 60 ? 'risk-bar-high' : riskScore >= 30 ? 'risk-bar-med' : 'risk-bar-low';
@@ -338,14 +415,16 @@ function renderOverview(h, from, to, subject, date, msgId, replyTo, returnPath, 
     </div>`
   ).join('');
 
-  /* Risk breakdown */
+  const barClass = riskScore >= 60 ? 'risk-bar-high' : riskScore >= 30 ? 'risk-bar-med' : 'risk-bar-low';
   const riskClass = riskScore >= 60 ? 'risk-high' : riskScore >= 30 ? 'risk-med' : 'risk-low';
-  const barClass  = riskScore >= 60 ? 'risk-bar-high' : riskScore >= 30 ? 'risk-bar-med' : 'risk-bar-low';
+
   let bdHtml = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-    <span style="font-size:36px;font-weight:800;font-family:var(--font-mono);class="${riskClass}">${riskScore}</span>
+    <span style="font-size:36px;font-weight:800;font-family:var(--font-mono)" class="${riskClass}">${riskScore}</span>
     <div>
       <div class="sum-lbl" style="margin-bottom:4px">Overall Risk Score</div>
-      <div class="risk-bar-wrap" style="width:160px"><div class="risk-bar-fill ${barClass}" style="width:${riskScore}%"></div></div>
+      <div class="risk-bar-wrap" style="width:160px">
+        <div class="risk-bar-fill ${barClass}" style="width:${riskScore}%"></div>
+      </div>
     </div>
   </div>`;
 
@@ -353,7 +432,10 @@ function renderOverview(h, from, to, subject, date, msgId, replyTo, returnPath, 
     bdHtml += `<div class="risk-items">` + riskBreakdown.map(rb =>
       `<div class="risk-item">
         <div class="risk-item-label">${escapeHtml(rb.label)}</div>
-        <div class="risk-item-bar-wrap"><div class="risk-item-bar ${rb.score >= 30 ? 'risk-bar-high' : rb.score >= 15 ? 'risk-bar-med' : 'risk-bar-low'}" style="width:${Math.min(100,(rb.score/40)*100)}%"></div></div>
+        <div class="risk-item-bar-wrap">
+          <div class="risk-item-bar ${rb.score >= 30 ? 'risk-bar-high' : rb.score >= 15 ? 'risk-bar-med' : 'risk-bar-low'}"
+            style="width:${Math.min(100, (rb.score / 40) * 100)}%"></div>
+        </div>
         <div class="risk-item-score">+${rb.score}</div>
       </div>`
     ).join('') + `</div>`;
@@ -363,18 +445,19 @@ function renderOverview(h, from, to, subject, date, msgId, replyTo, returnPath, 
 
   document.getElementById('risk-breakdown').innerHTML = bdHtml;
 
-  /* Auth pills */
   document.getElementById('auth-pills-overview').innerHTML =
-    ['spf','dkim','dmarc'].map(k => badge(auth[k]) + ` <span style="font-size:11px;color:var(--text3);margin-right:8px">${k.toUpperCase()}</span>`).join('');
+    ['spf', 'dkim', 'dmarc'].map(k =>
+      `${badge(auth[k])} <span style="font-size:11px;color:var(--text3);margin-right:10px">${k.toUpperCase()}</span>`
+    ).join('');
 }
 
 /* ─── Render: Auth ───────────────────────────────────────────────── */
 function renderAuth(auth, authResultsRaw, fromDomain, replyDomain, retDomain, dkimDomain) {
   const items = [
-    { name: 'SPF', key: 'spf', detail: 'Sender Policy Framework' },
-    { name: 'DKIM', key: 'dkim', detail: 'DomainKeys Identified Mail' },
+    { name: 'SPF',   key: 'spf',   detail: 'Sender Policy Framework' },
+    { name: 'DKIM',  key: 'dkim',  detail: 'DomainKeys Identified Mail' },
     { name: 'DMARC', key: 'dmarc', detail: 'Domain-based Msg Auth' },
-    { name: 'ARC', key: 'arc', detail: 'Authenticated Received Chain' }
+    { name: 'ARC',   key: 'arc',   detail: 'Authenticated Received Chain' }
   ];
 
   document.getElementById('auth-grid').innerHTML = items.map(item => `
@@ -384,13 +467,6 @@ function renderAuth(auth, authResultsRaw, fromDomain, replyDomain, retDomain, dk
       <div class="auth-item-detail">${item.detail}</div>
     </div>
   `).join('');
-
-  const alignData = [
-    { label: 'From Domain', val: fromDomain },
-    { label: 'DKIM Domain (d=)', val: dkimDomain },
-    { label: 'Return-Path', val: retDomain },
-    { label: 'Reply-To', val: replyDomain }
-  ];
 
   const dkimAlign = dkimDomain && fromDomain ? dkimDomain === fromDomain : null;
   const retAlign  = retDomain  && fromDomain ? retDomain  === fromDomain : null;
@@ -419,8 +495,7 @@ function renderAuth(auth, authResultsRaw, fromDomain, replyDomain, retDomain, dk
       </div>
     </div>`;
 
-  const rawBlock = document.getElementById('raw-auth-block');
-  rawBlock.textContent = authResultsRaw || 'Authentication-Results header not found.';
+  document.getElementById('raw-auth-block').textContent = authResultsRaw || 'Authentication-Results header not found.';
   document.getElementById('raw-auth-card').style.display = authResultsRaw ? '' : 'none';
 }
 
@@ -430,50 +505,62 @@ function renderRouting(hops, xOrigIP) {
 
   if (hops.length === 0) {
     tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:24px">No Received headers found</td></tr>`;
-    return;
+  } else {
+    tbody.innerHTML = hops.map((hop, i) => {
+      const delay = (i > 0 && hop.date && hops[i - 1].date)
+        ? Math.round((hop.date - hops[i - 1].date) / 1000) + 's'
+        : '—';
+      const isPriv = hop.ip && isPrivateIP(hop.ip);
+      const typeLabel = !hop.ip
+        ? '<span style="color:var(--text3)">—</span>'
+        : isPriv
+          ? `<span class="badge badge-info">Internal</span>`
+          : `<span class="badge badge-pass">External</span>`;
+      const delayColor = parseInt(delay) > 60 ? 'color:var(--amber)' : '';
+
+      return `<tr>
+        <td><div class="hop-num">${i + 1}</div></td>
+        <td>${escapeHtml(hop.from) || '—'}</td>
+        <td>${escapeHtml(hop.by) || '—'}</td>
+        <td>${hop.ip ? `<span style="font-family:var(--font-mono)">${escapeHtml(hop.ip)}</span>` : '—'}</td>
+        <td style="font-size:11px">${escapeHtml(hop.dateStr) || '—'}</td>
+        <td style="${delayColor}">${delay}</td>
+        <td>${typeLabel}</td>
+      </tr>`;
+    }).join('');
   }
 
-  tbody.innerHTML = hops.map((hop, i) => {
-    const delay = (i > 0 && hop.date && hops[i - 1].date)
-      ? Math.round((hop.date - hops[i - 1].date) / 1000) + 's'
-      : '—';
-    const isPriv = hop.ip && isPrivateIP(hop.ip);
-    const typeLabel = !hop.ip ? '—' : isPriv ? `<span class="badge badge-info">Internal</span>` : `<span class="badge badge-pass">External</span>`;
-    const hopClass = !hop.ip ? '' : isPriv ? 'hop-type-int' : '';
-
-    return `<tr>
-      <td><div class="hop-num ${hopClass}">${i + 1}</div></td>
-      <td>${escapeHtml(hop.from) || '—'}</td>
-      <td>${escapeHtml(hop.by) || '—'}</td>
-      <td>${hop.ip ? `<span style="font-family:var(--font-mono)">${escapeHtml(hop.ip)}</span>` : '—'}</td>
-      <td>${escapeHtml(hop.dateStr) || '—'}</td>
-      <td style="color:${parseInt(delay) > 60 ? 'var(--amber)' : 'var(--text2)'}">${delay}</td>
-      <td>${typeLabel}</td>
-    </tr>`;
-  }).join('');
-
-  /* Originating IP section */
+  /* Originating IP */
   const firstExtHop = hops.find(h => h.ip && !isPrivateIP(h.ip));
   const originSection = document.getElementById('origin-ip-section');
+  const ip = xOrigIP || (firstExtHop ? firstExtHop.ip : '');
 
-  if (xOrigIP || firstExtHop) {
-    const ip = xOrigIP || (firstExtHop ? firstExtHop.ip : '');
+  if (ip) {
     originSection.innerHTML = `
       <div class="origin-ip-grid">
         <div class="align-item">
           <div class="align-label">Detected originating IP</div>
-          <div class="align-val" style="font-size:16px">${escapeHtml(ip)}</div>
+          <div class="align-val" style="font-size:15px;margin-top:4px">${escapeHtml(ip)}</div>
         </div>
         <div class="align-item">
           <div class="align-label">IP type</div>
-          <div class="align-val">${isPrivateIP(ip) ? '🏢 Private / Internal' : '🌐 Public / External'}</div>
+          <div class="align-val" style="margin-top:4px">${isPrivateIP(ip) ? '🏢 Private / Internal' : '🌐 Public / External'}</div>
         </div>
         <div class="align-item">
-          <div class="align-label">Threat lookup</div>
-          <div class="align-val">
-            <a href="https://www.virustotal.com/gui/ip-address/${encodeURIComponent(ip)}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px">VirusTotal ↗</a>
-            &nbsp;·&nbsp;
-            <a href="https://www.abuseipdb.com/check/${encodeURIComponent(ip)}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px">AbuseIPDB ↗</a>
+          <div class="align-label">Threat intel lookup</div>
+          <div style="margin-top:6px;display:flex;flex-direction:column;gap:6px">
+            <a href="https://www.virustotal.com/gui/ip-address/${encodeURIComponent(ip)}" target="_blank"
+              style="color:var(--accent);text-decoration:none;font-size:12px;font-family:var(--font-mono)">
+              ↗ VirusTotal
+            </a>
+            <a href="https://www.abuseipdb.com/check/${encodeURIComponent(ip)}" target="_blank"
+              style="color:var(--accent);text-decoration:none;font-size:12px;font-family:var(--font-mono)">
+              ↗ AbuseIPDB
+            </a>
+            <a href="https://threatintelligenceplatform.com/indicator/${encodeURIComponent(ip)}" target="_blank"
+              style="color:var(--accent);text-decoration:none;font-size:12px;font-family:var(--font-mono)">
+              ↗ TIP Lookup
+            </a>
           </div>
         </div>
       </div>`;
@@ -507,76 +594,37 @@ function renderRaw(h) {
 /* ─── Tab Switcher ───────────────────────────────────────────────── */
 function switchTab(btn, name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.tab-pane').forEach(p => {
+    p.classList.remove('active');
+    p.classList.add('hidden');
+  });
   btn.classList.add('active');
-  document.getElementById('tab-' + name).classList.remove('hidden');
+  const pane = document.getElementById('tab-' + name);
+  pane.classList.remove('hidden');
+  pane.classList.add('active');
 }
 
 function switchTabByName(name) {
-  const tabs = ['overview','auth','routing','findings','raw'];
+  const tabs = ['overview', 'auth', 'routing', 'findings', 'raw'];
   document.querySelectorAll('.tab').forEach((t, i) => {
     t.classList.toggle('active', tabs[i] === name);
   });
-  document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
-  document.getElementById('tab-' + name).classList.remove('hidden');
+  document.querySelectorAll('.tab-pane').forEach(p => {
+    p.classList.remove('active');
+    p.classList.add('hidden');
+  });
+  const pane = document.getElementById('tab-' + name);
+  if (pane) {
+    pane.classList.remove('hidden');
+    pane.classList.add('active');
+  }
 }
 
 /* ─── Clear ──────────────────────────────────────────────────────── */
 function clearAll() {
   document.getElementById('emlInput').value = '';
   document.getElementById('results').classList.add('hidden');
-}
-
-/* ─── Sample Data ────────────────────────────────────────────────── */
-function loadSample(type) {
-  const samples = {
-    phishing: `Received: from malicious-relay.xyz (malicious-relay.xyz [198.51.100.42])
-        by mx.targetcompany.com with ESMTP id abc123
-        for <victim@targetcompany.com>; Mon, 01 Apr 2024 09:15:32 +0000
-Received: from unknown (192.168.1.10)
-        by malicious-relay.xyz with SMTP; Mon, 01 Apr 2024 09:15:20 +0000
-Authentication-Results: mx.targetcompany.com;
-        dkim=fail (signature verification failed) header.d=paypal.com;
-        spf=softfail (domain of noreply@paypal.com does not designate 198.51.100.42 as permitted sender);
-        dmarc=fail action=none header.from=paypal.com
-Received-SPF: softfail (domain of noreply@paypal.com does not designate 198.51.100.42 as permitted sender)
-        client-ip=198.51.100.42; envelope-from=bounces@malicious-relay.xyz
-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=paypal.com; s=default;
-        h=from:to:subject:date; bh=abc123=; b=INVALIDSIG==
-From: "PayPal Security Team" <security@paypal.com>
-Reply-To: collect-creds@malicious-relay.xyz
-To: victim@targetcompany.com
-Subject: Urgent: Your PayPal account has been limited - Action required
-Date: Mon, 01 Apr 2024 09:14:00 +0000
-Message-ID: <fake.msg.id@malicious-relay.xyz>
-X-Mailer: PHPMailer 6.0.0
-X-Originating-IP: 198.51.100.42
-X-Priority: 1
-X-Spam-Status: Yes, score=8.4 required=5.0 tests=BAYES_99,DKIM_ADSP_DISCARD,FORGED_MUA_MOZILLA`,
-
-    legit: `Received: from mail-oa1-f41.google.com (mail-oa1-f41.google.com [209.85.160.41])
-        by mx.company.com with ESMTPS id x12si1234567oib.65.2024.01.15.08.23.44
-        for <employee@company.com>; Mon, 15 Jan 2024 08:23:44 -0800 (PST)
-Received: by mail-oa1-f41.google.com with SMTP id 586e51a60fabf-1f2345678901so2345678oab.1
-        for <employee@company.com>; Mon, 15 Jan 2024 08:23:44 -0800 (PST)
-Authentication-Results: mx.company.com;
-        dkim=pass header.i=@gmail.com header.s=20230601 header.b=Abc123De;
-        spf=pass (company.com: domain of sender@gmail.com designates 209.85.160.41 as permitted sender) smtp.mailfrom=sender@gmail.com;
-        dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=gmail.com
-Received-SPF: pass (company.com: domain of sender@gmail.com designates 209.85.160.41 as permitted sender)
-        client-ip=209.85.160.41
-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=gmail.com; s=20230601;
-        h=from:to:subject:date:message-id:mime-version;
-        bh=ValidBodyHash=; b=ValidSignature=
-From: John Smith <sender@gmail.com>
-To: employee@company.com
-Subject: Q4 report attached
-Date: Mon, 15 Jan 2024 08:23:40 -0800
-Message-ID: <CA+valid-message-id@mail.gmail.com>
-MIME-Version: 1.0
-X-Mailer: Apple Mail
-Content-Type: multipart/mixed`
-  };
-
-  document.getElementById('emlInput').value = samples[type];
+  resetInputHint();
+  const fileInput = document.getElementById('emlFileInput');
+  if (fileInput) fileInput.value = '';
 }
